@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+
+supabase
+postgrest
+
+requests
+python-dotenv
+
+pydantic
+websockets
+numpy
+python-pptx
+
+httpx
