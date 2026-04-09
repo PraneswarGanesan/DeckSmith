@@ -10,6 +10,10 @@ python-dotenv
 pydantic
 websockets
 numpy
+rank-bm25
 python-pptx
 
 httpx
+
+langchain
+langgraph
