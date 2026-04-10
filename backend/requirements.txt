@@ -1,19 +1,23 @@
-fastapi
-uvicorn
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+python-dotenv>=1.0.1
+pydantic>=2.9.0
+python-multipart>=0.0.12
 
-supabase
-postgrest
+# Supabase
+supabase>=2.9.0
+httpx>=0.27.0
 
-requests
-python-dotenv
+# LangGraph orchestration (pulls in langchain-core)
+langgraph>=0.2.58
+langchain-core>=0.3.0
 
-pydantic
-websockets
-numpy
-rank-bm25
-python-pptx
+# RAG
+rank-bm25>=0.2.2
+numpy>=2.1.0
 
-httpx
+# PPTX generation (native charts — no matplotlib needed)
+python-pptx>=1.0.0
 
-langchain
-langgraph
+# Utilities
+tqdm>=4.66.0
