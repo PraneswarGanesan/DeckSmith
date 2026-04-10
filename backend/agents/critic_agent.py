@@ -48,7 +48,10 @@ async def critic_node(state: dict) -> dict:
             start, end = raw.find("["), raw.rfind("]") + 1
             if start != -1 and end > 0:
                 improved: list[str] = json.loads(raw[start:end])
-                slide = {**slide, "content": improved[:5]}
+                # Only accept clean string bullets — reject if LLM returned garbage
+                clean = [b for b in improved if isinstance(b, str) and len(b.split()) >= 2]
+                if clean:
+                    slide = {**slide, "content": clean[:5]}
         except Exception as exc:
             logger.warning(f"[Critic] Skipping '{slide['title']}': {exc}")
 

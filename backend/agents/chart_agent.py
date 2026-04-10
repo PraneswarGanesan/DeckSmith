@@ -20,15 +20,19 @@ async def chart_node(state: dict) -> dict:
             charts.append({})
             continue
 
-        tables = get_tables_for_subsection(slide["subsection_id"])
-        if not tables:
-            logger.debug(f"[Chart] Slide {i} has type=chart but no tables found")
-            charts.append({})
-            continue
+        try:
+            tables = get_tables_for_subsection(slide["subsection_id"])
+            if not tables:
+                logger.debug(f"[Chart] Slide {i} has type=chart but no tables found")
+                charts.append({})
+                continue
 
-        chart_data = build_chart_data(tables[0])
-        charts.append(chart_data or {})
-        logger.debug(f"[Chart] Slide {i}: chart_data={'ready' if chart_data else 'empty'}")
+            chart_data = build_chart_data(tables[0])
+            charts.append(chart_data or {})
+            logger.debug(f"[Chart] Slide {i}: chart_data={'ready' if chart_data else 'empty'}")
+        except Exception as exc:
+            logger.warning(f"[Chart] Slide {i}: Failed to fetch chart data ({type(exc).__name__}): {exc}")
+            charts.append({})
 
     logger.info(f"[Chart] Processed {len(charts)} slides")
     return {"charts": charts, "error": None}
