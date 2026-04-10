@@ -552,14 +552,17 @@ def _add_left_text_right_visual_slide(prs, title, bullets, image_url=None):
     vis_w   = Inches(4.8)
     vis_left = SLIDE_W - vis_w - M_R
     vis_h   = SLIDE_H - content_top - M_B
-    _render_bullet_cards(slide, Inches(0.5), content_top, text_w, clean, PRIMARY)
-    _insert_image(slide, image_url, vis_left, content_top, vis_w, vis_h, CARD_BG)
+    if image_url:
+        _render_bullet_cards(slide, Inches(0.5), content_top, text_w, clean, PRIMARY)
+        _insert_image(slide, image_url, vis_left, content_top, vis_w, vis_h, CARD_BG)
+    else:
+        _render_bullet_cards(slide, Inches(0.5), content_top, SLIDE_W - Inches(1.0), clean, PRIMARY)
 
 
 def _add_process_slide(prs, title, bullets):
     slide = prs.slides.add_slide(_blank_layout(prs))
     _slide_header(slide, title)
-    clean = [_sanitize(b) for b in bullets if b and _sanitize(b)][:5]
+    clean = [_sanitize(b) for b in bullets if b and _sanitize(b)][:4]  # max 4 for readability
     if not clean:
         return
     n = len(clean)
@@ -689,12 +692,18 @@ def _add_table_slide(prs, title, table_data):
         for col_idx in range(n_cols):
             cell = tbl.cell(row_idx + 1, col_idx)
             val = row_values[col_idx] if col_idx < len(row_values) else ""
-            cell.text = str(val)
+            val = str(val)
+            # Strip URLs and long strings that clutter table cells
+            val = re.sub(r'https?://\S+', '', val).strip()
+            val = re.sub(r'\[.*?\]', '', val).strip()  # strip markdown links
+            if len(val) > 60:
+                val = val[:57] + "…"
+            cell.text = val
             _set_cell_bg(cell, bg)
             for para in cell.text_frame.paragraphs:
                 para.alignment = PP_ALIGN.CENTER
                 for run in para.runs:
-                    run.font.size = Pt(12)
+                    run.font.size = Pt(11)
                     run.font.color.rgb = DARK
 
 
@@ -740,12 +749,12 @@ def _render_visual_process_slide(prs: Presentation, title: str, visual_structure
     slide = prs.slides.add_slide(_blank_layout(prs))
     _slide_header(slide, title)
     
-    elements = visual_structure.get("elements", [])[:5]
+    elements = visual_structure.get("elements", [])[:4]  # max 4 steps for readability
     if not elements:
         return
-    
+
     n = len(elements)
-    step_gap = Inches(0.18)
+    step_gap = Inches(0.2)
     total_w = SLIDE_W - Inches(1.0)
     step_w = (total_w - step_gap * (n - 1)) / n
     step_top = Inches(1.4)
@@ -865,30 +874,53 @@ def _render_visual_chart_slide(prs: Presentation, title: str, visual_structure: 
         logger.warning(f"[Template] Visual chart insert failed: {exc}")
 
 
-def _render_visual_grid_slide(prs: Presentation, title: str, visual_structure: dict) -> None:
-    """Render generic grid layout."""
+def _render_visual_grid_slide(prs: Presentation, title: str, visual_structure: dict, image_url: str | None = None) -> None:
+    """Render generic grid layout — with optional image on right when available."""
     slide = prs.slides.add_slide(_blank_layout(prs))
     _slide_header(slide, title)
-    
+
     layout_type = visual_structure.get("layout", "single-column")
-    
+    content_top = Inches(1.25)
+
+    if image_url:
+        # bullets left, image right
+        img_bytes = _download_image(image_url)
+        col_gap = Inches(0.3)
+        col_w = (SLIDE_W - Inches(1.0) - col_gap) / 2
+        col_h = SLIDE_H - content_top - M_B
+        elements = visual_structure.get("elements", []) or (
+            visual_structure.get("left_column", []) + visual_structure.get("right_column", [])
+        )
+        bullets = [elem.get("text", "") for elem in elements]
+        _render_bullet_cards(slide, Inches(0.5), content_top, col_w, bullets, PRIMARY)
+        if img_bytes:
+            try:
+                slide.shapes.add_picture(io.BytesIO(img_bytes),
+                                         Inches(0.5) + col_w + col_gap, content_top,
+                                         width=col_w, height=col_h)
+            except Exception:
+                _add_rect(slide, Inches(0.5) + col_w + col_gap, content_top, col_w, col_h, CARD_BG)
+        else:
+            _add_rect(slide, Inches(0.5) + col_w + col_gap, content_top, col_w, col_h, CARD_BG)
+        return
+
     if layout_type == "single-column":
         elements = visual_structure.get("elements", [])
         bullets = [elem.get("text", "") for elem in elements]
-        _render_bullet_cards(slide, Inches(0.5), Inches(1.25), SLIDE_W - Inches(1.0), bullets, PRIMARY)
+        _render_bullet_cards(slide, Inches(0.5), content_top, SLIDE_W - Inches(1.0), bullets, PRIMARY)
     else:
         left_elements = visual_structure.get("left_column", [])
         right_elements = visual_structure.get("right_column", [])
         left_bullets = [elem.get("text", "") for elem in left_elements]
         right_bullets = [elem.get("text", "") for elem in right_elements]
-        
+
         col_gap = Inches(0.3)
         col_w = (SLIDE_W - Inches(1.0) - col_gap) / 2
         col1_x = Inches(0.5)
         col2_x = Inches(0.5) + col_w + col_gap
-        
-        _render_bullet_cards(slide, col1_x, Inches(1.25), col_w, left_bullets, PRIMARY)
-        _render_bullet_cards(slide, col2_x, Inches(1.25), col_w, right_bullets, SECONDARY)
+
+        _render_bullet_cards(slide, col1_x, content_top, col_w, left_bullets, PRIMARY)
+        _render_bullet_cards(slide, col2_x, content_top, col_w, right_bullets, SECONDARY)
 
 
 def _render_visual_left_text_right_slide(prs: Presentation, title: str, visual_structure: dict, image_url: str | None) -> None:
@@ -906,8 +938,12 @@ def _render_visual_left_text_right_slide(prs: Presentation, title: str, visual_s
     vis_left = SLIDE_W - vis_w - M_R
     vis_h = SLIDE_H - content_top - M_B
     
-    _render_bullet_cards(slide, Inches(0.5), content_top, text_w, clean, PRIMARY)
-    _insert_image(slide, image_url, vis_left, content_top, vis_w, vis_h, CARD_BG)
+    if image_url:
+        _render_bullet_cards(slide, Inches(0.5), content_top, text_w, clean, PRIMARY)
+        _insert_image(slide, image_url, vis_left, content_top, vis_w, vis_h, CARD_BG)
+    else:
+        # No image — use full width for bullets
+        _render_bullet_cards(slide, Inches(0.5), content_top, SLIDE_W - Inches(1.0), clean, PRIMARY)
 
 
 # ── Layout dispatcher ──────────────────────────────────────────────────────────
@@ -957,7 +993,7 @@ def _dispatch_slide(
             elif visual_type == "left-text-right-visual":
                 _render_visual_left_text_right_slide(prs, title, visual_structure, image_url)
             else:  # "grid" or unknown
-                _render_visual_grid_slide(prs, title, visual_structure)
+                _render_visual_grid_slide(prs, title, visual_structure, image_url)
             return  # Success, exit early
             
         except Exception as exc:

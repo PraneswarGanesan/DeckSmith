@@ -115,7 +115,12 @@ def _sanitize_bullet(text: str) -> str:
 
     text = re.sub(r"\*+", "", text)
     text = re.sub(r"^[-•*]\s*", "", text).strip()
-    text = re.sub(r"^\w[\w\s]{0,20}:\s*", "", text).strip()  # strip "Title: ..."
+    # Strip JSON key-value artifacts: "key": "value"  or  key: [
+    text = re.sub(r'^"[\w_\s]+":\s*', "", text).strip()
+    text = re.sub(r"^\w[\w\s]{0,20}:\s*", "", text).strip()
+    # Strip leftover JSON punctuation at ends
+    text = re.sub(r'[,\[\]{}"]+$', "", text).strip()
+    text = re.sub(r'^[,\[\]{}"]+', "", text).strip()
     text = re.sub(r"\s+", " ", text).strip()
 
     words = text.split()
@@ -238,11 +243,17 @@ async def content_node(state: dict) -> dict:
             except Exception as exc:
                 logger.warning(f"[Content] DB fetch failed for {sub_id}: {exc}")
 
-        # ── Slides with no source content (intro overview, Q&A, etc.) ─────
+        # ── Slides with no source content (agenda, Q&A, highlight, etc.) ────
         if not content_text:
             logger.debug(f"[Content] '{title}' — no source content")
-            # Generate generic bullets from title + query
-            if intent not in ("qna",):
+
+            # Agenda: combined_content holds pipe-separated section titles
+            if intent == "intro" and title.lower().startswith("agenda"):
+                raw_agenda = item.get("combined_content", "")
+                bullets = [t.strip() for t in raw_agenda.split("|") if t.strip()][:6]
+                if not bullets:
+                    bullets = [query]
+            elif intent not in ("qna",):
                 try:
                     prompt = _PROMPT_GENERIC.format(title=title, query=query)
                     raw    = await generate(prompt, temperature=0.3, max_tokens=256)

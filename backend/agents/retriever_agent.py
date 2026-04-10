@@ -39,7 +39,7 @@ async def retriever_node(state: dict) -> dict:
     logger.info(f"[Retriever] query='{query[:60]}'  doc_id={doc_id[:8]}...")
 
     try:
-        retrieved = await hybrid_search(doc_id=doc_id, query=query, top_k=12)
+        retrieved = await hybrid_search(doc_id=doc_id, query=query, top_k=18)
         
         if not retrieved:
             logger.warning(f"[Retriever] No subsections found for doc_id={doc_id}")

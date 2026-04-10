@@ -20,56 +20,53 @@ logger = get_logger(__name__)
 
 # ── LLM prompt ───────────────────────────────────────────────────────────────
 _PROMPT = """\
-You are a McKinsey-style presentation architect.
+You are a senior presentation designer. Generate a COMPLETE, professional slide plan.
 
 Document topic: {query}
 
-Content sections available (already grouped and classified):
+Content sections available:
 {sections}
 
-YOUR TASK
-Create a slide plan that tells ONE coherent story about the topic.
+MANDATORY SLIDE ORDER (follow exactly):
+  Slide 1 : AGENDA          → layout:"grid-2",   intent:"intro",      id:null
+  Slide 2 : INTRODUCTION    → layout:"left-text-right-visual", intent:"intro", pick best intro section id
+  Slides 3-5: CORE CONTENT  → pick 3 most important sections, use layout based on content type
+  Slide 6 : DATA/ANALYSIS   → layout:"chart" or "comparison", intent:"analysis", pick data-rich section
+  Slide 7 : SOLUTION/ACTION → layout:"process",  intent:"solution",   pick solution/recommendation section
+  Slide 8 : KEY HIGHLIGHT   → layout:"centered", intent:"results",    id:null  (one powerful insight)
+  Slide 9 : CONCLUSION      → layout:"centered", intent:"conclusion", id:null
+  Slide 10: Q&A             → layout:"centered", intent:"qna",        id:null
 
-MANDATORY STORY ARC:
-  Slide 1   : Overview / Executive Summary   → layout: "grid-2"
-  Slides 2-3: Problem or Context             → layout: "left-text-right-visual"
-  Slides 4-6: Analysis, Evidence, or Data    → use "chart", "comparison", or "grid-3"
-  Slide 7   : Solution / Recommendations     → layout: "process"
-  Slide 8   : Conclusion / Key Takeaways     → layout: "centered"
-  Last slide: Q&A                            → layout: "centered", id: null
+TITLE RULES:
+  • Action phrases only — verb + insight
+  • Good: "Three Factors Drive 80% of Risk"   Bad: "Section 3 Overview"
+  • Good: "Regulation Mandates Action by Q4"  Bad: "Policy Introduction"
+  • Max 8 words. No section numbers.
 
-SLIDE TITLE RULES (critical):
-  • Titles must be ACTION PHRASES — not section headings
-  • Bad : "Section 10.2 Stress Testing"
-  • Good: "Stress Tests Reveal Three Critical System Weaknesses"
-  • Bad : "Introduction to Fraud Detection"
-  • Good: "Fraud Costs the Industry $6B Annually — Here's Why"
-  • Max 8 words per title
-  • No numbering, no "Section X.Y"
+LAYOUT SELECTION:
+  "grid-2"                 : general content, overview, policy, two balanced columns
+  "grid-3"                 : exactly 3 pillars/principles/categories
+  "left-text-right-visual" : context, problem, risk — image placeholder on right
+  "process"                : steps, workflow, implementation sequence
+  "chart"                  : ANY slide with numbers, percentages, metrics, trends
+  "comparison"             : before/after, pros/cons, old vs new
+  "centered"               : highlight, conclusion, Q&A — single strong message
 
-DEDUPLICATION RULES:
-  • Do NOT create two slides on the same topic
-  • Each section id must appear at most ONCE
-  • Skip sections that duplicate a topic already covered
+RULES:
+  • If a section has numbers/percentages/dates → use layout "chart" and type "chart"
+  • If a section compares things → use "comparison"
+  • If a section lists steps → use "process"
+  • Each section id used AT MOST ONCE
+  • Agenda and Q&A always have id: null
 
-OUTPUT: JSON array, each item:
-  "title"             : action-oriented slide title (max 8 words)
-  "subsection_id"     : section id from the list above (or null for intro/Q&A)
-  "type"              : "content" | "chart"
-  "layout"            : one of the 7 layout types below
-  "intent"            : one of: intro|problem|analysis|solution|results|policy|conclusion|qna
+OUTPUT: JSON array only. Each item MUST have ALL these fields:
+  "title"          : string (action phrase, max 8 words)
+  "subsection_id"  : string id from list above, or null
+  "type"           : "content" or "chart"
+  "layout"         : one of the 7 layout types above
+  "intent"         : intro|problem|analysis|solution|results|policy|conclusion|qna
 
-LAYOUT TYPES:
-  "grid-2"                 : overview, policy, future steps, balanced two-column
-  "grid-3"                 : exactly 3 pillars, principles, or categories
-  "left-text-right-visual" : problem, challenge, risk, context (image on right)
-  "process"                : sequential steps, workflow, methodology
-  "chart"                  : numeric data, metrics, statistics, trends
-  "comparison"             : before/after, pros/cons, analysis, key insights
-  "centered"               : conclusion, takeaway, Q&A
-
-Max 8 content slides (not counting Q&A).
-Return ONLY valid JSON — no markdown, no explanation.
+Return ONLY the JSON array. No markdown. No explanation. No extra text.
 """
 
 # ── Layout validation ─────────────────────────────────────────────────────────
@@ -145,16 +142,19 @@ def _infer_layout(title: str, intent: str, position: int, total: int) -> str:
 
 def _build_fallback_plan(grouped: list[dict], query: str) -> list[dict]:
     """Create a sensible plan from grouped sections without LLM."""
-    plan = [{
-        "title":            f"{query} — Overview",
-        "subsection_id":    None,
-        "type":             "content",
-        "layout":           "grid-2",
-        "intent":           "intro",
-        "combined_content": "",
-    }]
-    total = min(len(grouped), 6) + 2
-    for i, group in enumerate(grouped[:6]):
+    agenda_bullets = " | ".join(g["title"] for g in grouped[:6])
+    plan = [
+        {
+            "title":            "Agenda",
+            "subsection_id":    None,
+            "type":             "content",
+            "layout":           "grid-2",
+            "intent":           "intro",
+            "combined_content": agenda_bullets,
+        },
+    ]
+    total = min(len(grouped), 7) + 3
+    for i, group in enumerate(grouped[:7]):
         intent = group.get("intent", "content")
         layout = _infer_layout(group["title"], intent, i + 1, total)
         slide_type = "chart" if (group.get("has_table") and layout == "chart") else "content"
@@ -166,14 +166,24 @@ def _build_fallback_plan(grouped: list[dict], query: str) -> list[dict]:
             "intent":           intent,
             "combined_content": group.get("combined_content", ""),
         })
-    plan.append({
-        "title":            "Questions?",
-        "subsection_id":    None,
-        "type":             "content",
-        "layout":           "centered",
-        "intent":           "qna",
-        "combined_content": "",
-    })
+    plan.extend([
+        {
+            "title":            f"Key Insight: {query[:40]}",
+            "subsection_id":    None,
+            "type":             "content",
+            "layout":           "centered",
+            "intent":           "results",
+            "combined_content": "",
+        },
+        {
+            "title":            "Questions?",
+            "subsection_id":    None,
+            "type":             "content",
+            "layout":           "centered",
+            "intent":           "qna",
+            "combined_content": "",
+        },
+    ])
     return plan
 
 
@@ -282,23 +292,39 @@ async def planner_node(state: dict) -> dict:
                 "combined_content": combined_content,
             })
 
-        # Cap at 8 content slides
-        validated = validated[:8]
+        # Cap at 10 content slides
+        validated = validated[:10]
 
-        # Ensure slide 1 is always an overview
-        if not validated or validated[0].get("subsection_id") is not None:
+        # Ensure slide 1 is AGENDA (no subsection_id, intent=intro)
+        if not validated or validated[0].get("intent") != "intro" or validated[0].get("subsection_id") is not None:
+            # Build agenda bullets from section titles
+            agenda_bullets = " | ".join(g["title"] for g in grouped[:6])
             validated.insert(0, {
-                "title":            f"{query} — Overview",
+                "title":            "Agenda",
                 "subsection_id":    None,
                 "type":             "content",
                 "layout":           "grid-2",
                 "intent":           "intro",
+                "combined_content": agenda_bullets,
+            })
+
+        # Ensure a highlight/centered slide exists before conclusion
+        has_highlight = any(s.get("intent") in ("results", "conclusion") and s.get("subsection_id") is None
+                            for s in validated)
+        if not has_highlight:
+            # Insert highlight before last slide
+            validated.insert(-1, {
+                "title":            f"Key Insight: {query[:40]}",
+                "subsection_id":    None,
+                "type":             "content",
+                "layout":           "centered",
+                "intent":           "results",
                 "combined_content": "",
             })
 
         # Ensure last slide is Q&A
         last = validated[-1] if validated else {}
-        if last.get("layout") != "centered" or last.get("intent") != "qna":
+        if last.get("intent") != "qna":
             validated.append({
                 "title":            "Questions?",
                 "subsection_id":    None,

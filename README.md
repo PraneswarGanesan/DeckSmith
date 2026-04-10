@@ -1,44 +1,680 @@
-# SYSTEM SPECIFICATION: Aegis PPT-Agent Backend (Prototype v3)
+# 🧠 Template-Aware Multi-Agent RAG System
 
-## 1. PROJECT OVERVIEW
-**Aegis PPT-Agent** is a multi-tenant, agentic microservice that converts large Markdown (.md) files into professional .pptx presentations. It uses a deterministic math engine for layout instead of LLM guessing, adapts to user-uploaded Slide Masters, and generates a full "Performance Script" with speaker notes.
+## 📌 Overview
+
+This project is a **Template-Aware Multi-Agent RAG System** that converts structured Markdown (`.md`) files into fully formatted presentations (PPT/DOC).
+
+It combines:
+
+* Structured parsing
+* Retrieval-Augmented Generation (RAG)
+* Multi-agent orchestration
+* Template-driven rendering
 
 ---
 
-## 2. BACKEND FOLDER STRUCTURE
-The system MUST follow this structure. Each package requires a `test.py` and a local `requirements.txt`.
+## 🚀 What the System Does
 
-/backend
-├── main.py                     # FastAPI + JWT Auth + User Middleware
-├── .env                        # Credentials (Supabase, Unsplash, Ollama)
-├── core_agent/                 # ORCHESTRATION
-│   ├── graph.py                # LangGraph definition (Checkpointers + Feedback Loop)
-│   ├── states.py               # RLS-aware State (VisualFatigue, User_ID)
-│   ├── storyboarder.py         # Content planning logic
-│   └── feedback_processor.py   # Partial slide re-generator
-├── ingestor/                   # DATA & STORAGE
-│   ├── md_parser.py            # Chunker (preserves tables/H-levels)
-│   ├── template_analyzer.py    # XML Scanner for Slide Master coordinates
-│   └── indexer.py              # Supabase pgvector + BM25 (RLS partition)
-├── designer/                   # VISUAL GEN
-│   ├── geometry_engine.py      # MATH: Bounding boxes & Collision math
-│   ├── infographic_gen.py      # SHAPES: Turning bullets into diagrams
-│   ├── chart_factory.py        # DATA: Native PPTX chart creation
-│   └── unsplash_client.py      # ASSETS: License-compliant image fetching
-├── renderer/                   # ASSEMBLY
-│   ├── ppt_engine.py           # Final python-pptx assembly + Notes Pane
-│   ├── constraint_mapper.py    # Mapping AI intent to Template placeholders
-│   └── style_guard.py          # RGB/Font theme enforcement
-├── delivery_expert/            # PERFORMANCE
-│   ├── notes_engine.py         # 2-4 line clarifiers + Speaker notes
-│   └── script_gen.py           # MD script with cues ([Pause], [Highlight])
-└── utils/                      # HELPERS
-    ├── ollama_wrapper.py       # Local LLM Interface
-    └── auth_helpers.py         # Supabase Auth verification
+* Accepts structured `.md` files
+* Parses them into:
+
+  * Sections
+  * Subsections
+  * Tables
+* Stores structured data in Supabase
+* Uses RAG (BM25 + embeddings) for retrieval
+* Uses multi-agents (LangChain / LangGraph) to:
+
+  * Plan slides
+  * Generate content
+  * Generate charts from tables
+  * Fetch images (Unsplash)
+* Injects content into user-uploaded templates
+* Outputs final PPT/DOC files
+
+---
+
+## 🔄 End-to-End Flow
+
+```
+Upload MD + Template
+        ↓
+Supabase Storage
+        ↓
+Ingestor (parse + store structured data)
+        ↓
+Embeddings (nomic)
+        ↓
+Retriever (BM25 + vector)
+        ↓
+Planner Agent
+        ↓
+ ├── Content Agent
+ ├── Chart Agent
+ ├── Image Agent
+        ↓
+Template Mapper (python-pptx)
+        ↓
+Final Output (stored in Supabase)
+```
+
+---
+
+## 🗄️ Database Schema
+
+### 1. user_profile
+
+Stores user information
+
+| Column        | Type        |
+| ------------- | ----------- |
+| id            | uuid (PK)   |
+| username      | text        |
+| email         | text        |
+| password_hash | text        |
+| created_at    | timestamptz |
+
+---
+
+### 2. user_assets
+
+Tracks uploaded files
+
+| Column       | Type        |
+| ------------ | ----------- |
+| id           | uuid (PK)   |
+| user_id      | uuid (FK)   |
+| filename     | text        |
+| filetype     | text        |
+| storage_path | text        |
+| created_at   | timestamptz |
+
+---
+
+### 3. document_structure
+
+Represents one markdown document
+
+| Column            | Type        |
+| ----------------- | ----------- |
+| id                | uuid (PK)   |
+| asset_id          | uuid (FK)   |
+| doc_title         | text        |
+| executive_summary | text        |
+| created_at        | timestamptz |
+
+---
+
+### 4. sections
+
+Represents `##` headings
+
+| Column        | Type        |
+| ------------- | ----------- |
+| id            | uuid (PK)   |
+| doc_id        | uuid (FK)   |
+| section_index | int         |
+| section_title | text        |
+| created_at    | timestamptz |
+
+---
+
+### 5. subsections ⭐ (Main RAG Unit)
+
+| Column           | Type        |
+| ---------------- | ----------- |
+| id               | uuid (PK)   |
+| section_id       | uuid (FK)   |
+| subsection_index | int         |
+| subsection_title | text        |
+| content          | text        |
+| summary          | text        |
+| keywords         | text[]      |
+| embedding        | vector(768) |
+| created_at       | timestamptz |
+
+---
+
+### 6. tables_data ⭐ (For Charts)
+
+| Column        | Type        |
+| ------------- | ----------- |
+| id            | uuid (PK)   |
+| subsection_id | uuid (FK)   |
+| table_title   | text        |
+| headers       | text[]      |
+| rows          | jsonb       |
+| created_at    | timestamptz |
+
+---
+
+### 7. presentation_templates
+
+| Column            | Type        |
+| ----------------- | ----------- |
+| id                | uuid (PK)   |
+| user_id           | uuid (FK)   |
+| template_name     | text        |
+| storage_path      | text        |
+| placeholders_json | jsonb       |
+| created_at        | timestamptz |
+
+---
+
+### 8. generated_outputs
+
+| Column      | Type        |
+| ----------- | ----------- |
+| id          | uuid (PK)   |
+| user_id     | uuid (FK)   |
+| template_id | uuid (FK)   |
+| output_path | text        |
+| status      | text        |
+| created_at  | timestamptz |
+
+---
+
+## 📁 Backend Folder Structure
+
+```
+backend/
+│
+├── main.py
+├── config.py
+├── requirements.txt
+├── .env
+│
+├── agents/
+│   ├── ingestor_agent.py
+│   ├── retriever_agent.py
+│   ├── planner_agent.py
+│   ├── content_agent.py
+│   ├── chart_agent.py
+│   ├── image_agent.py
+│   ├── template_agent.py
+│
+├── services/
+│   ├── supabase_client.py
+│   ├── embedding_service.py
+│   ├── storage_service.py
+│
+├── utils/
+│   ├── markdown_parser.py
+│   ├── chunking.py
+│   ├── table_parser.py
+│   ├── chart_utils.py
+│   ├── template_utils.py
+│
+├── core/
+│   ├── graph.py
+│   ├── state.py
+│
+├── routes/
+│   ├── upload.py
+│   ├── generate.py
+│
+├── tests/
+│   ├── test_ingestor.py
+│   ├── test_parser.py
+│   ├── test_chart.py
+│
+└── templates/
+    ├── sample.pptx
+```
+
+---
+
+## 📄 File Descriptions
+
+### Root
+
+**main.py**
+
+* FastAPI entry point
+* Registers routes
+
+**config.py**
+
+* Loads environment variables
+* Stores API keys and configs
+
+**.env**
+
+* Secrets (Supabase, Ollama, Unsplash)
+
+**requirements.txt**
+
+* Python dependencies
+
+---
+
+## 🤖 Agents
+
+**ingestor_agent.py**
+
+* Parses markdown
+* Stores structured data
+* Generates embeddings
+
+**retriever_agent.py**
+
+* Hybrid retrieval (BM25 + vector)
+
+**planner_agent.py**
+
+* Creates slide plan (core logic)
+
+**content_agent.py**
+
+* Formats text for slides
+
+**chart_agent.py**
+
+* Converts tables → charts
+
+**image_agent.py**
+
+* Fetches images from Unsplash
+
+**template_agent.py**
+
+* Injects content into PPT using python-pptx
+
+---
+
+## 🧠 Services
+
+**supabase_client.py**
+
+* Handles DB operations
+
+**embedding_service.py**
+
+* Generates embeddings (Ollama + Nomic)
+
+**storage_service.py**
+
+* Handles file uploads/downloads
+
+---
+
+## 🧰 Utils
+
+**markdown_parser.py**
+
+* Extracts sections & subsections
+
+**table_parser.py**
+
+* Extracts tables into JSON
+
+**chunking.py**
+
+* Optional text splitting
+
+**chart_utils.py**
+
+* Generates charts
+
+**template_utils.py**
+
+* Handles template placeholders
+
+---
+
+## 🔁 Core (LangGraph)
+
+**graph.py**
+
+* Defines agent workflow
+
+**state.py**
+
+* Shared state across agents
+
+---
+
+## 🌐 Routes
+
+**upload.py**
+
+* Upload files to Supabase
+
+**generate.py**
+
+* Runs full pipeline
+
+---
+
+## 🧪 Tests
+
+**test_ingestor.py**
+
+* Tests ingestion pipeline
+
+**test_parser.py**
+
+* Tests markdown parsing
+
+**test_chart.py**
+
+* Tests chart generation
+
+---
+
+## 🎯 System Characteristics
+
+* Structured (hierarchical parsing)
+* Template-aware
+* Chart-aware
+* Multi-agent architecture
+* Deterministic output
 
 
+#Execution Order
+```
+config.py
+main.py
+
+services/
+    supabase_client.py
+    storage_service.py
+    embedding_service.py
+    auth_service.py
+    user_service.py
+
+utils/
+    markdown_parser.py
+    table_parser.py
+    chart_utils.py
+    template_utils.py
+
+agents/
+    ingestor_agent.py
+    retriever_agent.py
+    planner_agent.py
+    content_agent.py
+    chart_agent.py
+    image_agent.py
+    template_agent.py
+
+core/
+    state.py
+    graph.py
+
+routes/
+    auth.py
+    user.py
+    upload.py
+    generate.py
+
+tests/
+    test_config.py
+    test_auth.py
+    test_supabase_storage.py
+    test_ingestor.py
+    test_parser.py
+    test_chart.py
+```
 
 
+```
+You are helping build a **Template-Aware Multi-Agent RAG System (Production-grade, Hackathon-speed)**.
 
-This architecture operates as a Tenant-Isolated Intelligence Pipeline. It ensures that every user’s data is mathematically separated, highly searchable, and visually optimized for professional presentations.1. User Authentication & Isolated ProvisioningLogin & Handshake: The user authenticates via Supabase Auth (JWT).Tenant Isolation: Upon the first upload, the system creates a unique Row Level Security (RLS) partition in the user_assets table.Vector Store: A private index is initialized in pgvector using the user’s auth.uid as the primary key. This ensures that a search query from User A can never retrieve data belonging to User B.2. High-Fidelity "Content-Aware" IngestionUnlike standard recursive splitters, our Ingestor uses a Semantic Boundary Detector:Structural Parsing: The engine identifies H1 (Title), H2 (Section), and H3 (Sub-section) tags to maintain the document hierarchy.Table Preservation: Tables are extracted as distinct objects. The parser ensures row/column integrity is kept intact so the Chart Factory can later convert them into native PPTX charts.Boundary Detection: It detects logical ends of topics to prevent "sentence splitting," ensuring each chunk is a self-contained idea.3. Metadata & Enrichment EngineFor every chunk generated, the Enrichment Agent runs three parallel processes:Keyword Extraction: Identifies 5–10 core entities (e.g., "Accenture," "GenAI") for BM25 Keyword Search.Contextual Summary: Generates a 1-sentence "Global Context" for the chunk so the LLM understands its place in the larger document.Question Generation: Automatically creates 3 "Potential User Questions" based on the chunk. These are embedded alongside the text to improve Retrieval Accuracy (hitting the chunk even if the user's prompt is vague).4. Template-Guided GenerationTemplate Analysis: When a user uploads a .pptx template, the Template Analyzer scans the XML to find Safe Zones, color palettes (Hex codes), and font pairings.Constraint Mapping: The agent selects the best layout from the user's specific master (e.g., "Two Content" or "Comparison").Visual Enhancement: If a chunk contains bullet points, the Infographic Gen uses the Geometry Engine to draw native shapes (chevrons, boxes) and place text inside them, making the slide visually dynamic rather than text-heavy.5. The Feedback Loop (The "Edit" Flow)User Request: "I want Slide 4 to be a timeline instead of bullets."State Retrieval: The LangGraph identifies Slide 4’s specific metadata and original source chunk.Targeted Re-Gen: The Geometry Engine recalculates new coordinates for a timeline layout.Binary Patch: The Renderer deletes only the objects on Slide 4 and replaces them, leaving the rest of the 15-slide deck untouched.Summary of System TasksComponentResponsibilityTechnical ImplementationIngestorHigh-fidelity parsingMarkdown Regex + Table ExtractorsSupabaseMulti-tenant storagepgvector + RLS Policies + BM25Core AgentStoryboarding & VarietyLangGraph State MachineGeometryLayout & AlignmentDeterministic Coordinate MathDeliveryScripts & Speaker NotesNarrative Synthesis Agent
+STRICT RULES:
 
+* Do NOT over-engineer
+* Always follow existing database schema and relationships
+* Always give FULL working code (no pseudo code)
+* Always respect user-centric + table-centric design
+* Always enforce storage structure based on username
+* Always keep agents modular but deterministic
+* Prefer clarity over abstraction
+
+---
+
+🧠 SYSTEM OVERVIEW
+
+We are building:
+
+Template-Aware Multi-Agent RAG System
+Structured Markdown → Presentation (PPT/DOC)
+
+Core capabilities:
+
+* Parse structured markdown into hierarchy
+* Store in Supabase (relational + vector)
+* Retrieve using BM25 + embeddings
+* Use multi-agents (LangChain / LangGraph)
+* Generate:
+
+  * slide content
+  * charts from tables
+  * images (Unsplash)
+* Inject into templates using python-pptx
+
+---
+
+🔄 SYSTEM FLOW
+
+Upload MD + Template
+→ Supabase Storage
+→ Ingestor (parse + DB insert)
+→ Embeddings (nomic via Ollama)
+→ Retriever (BM25 + vector hybrid)
+→ Planner Agent (decides slides)
+→ Content + Chart + Image Agents
+→ Template Agent (python-pptx)
+→ Store final output
+
+---
+
+🗄️ DATABASE (STRICT RELATIONAL DESIGN)
+
+Tables:
+
+user_profile
+user_assets
+document_structure
+sections
+subsections (MAIN RAG UNIT)
+tables_data (FOR CHARTS)
+presentation_templates
+generated_outputs
+
+RELATION FLOW:
+
+user_profile
+→ user_assets
+→ document_structure
+→ sections
+→ subsections
+→ tables_data
+
+IMPORTANT:
+
+* Always use foreign keys (no loose mapping)
+* Never use filename for linking
+* Always use IDs
+
+---
+
+📊 RAG DESIGN
+
+* Only embed: subsections.content
+* Each subsection = semantic unit
+* tables_data is NOT embedded
+* Retrieval:
+
+  * BM25 → keyword match
+  * Vector → semantic match
+* Combine both
+
+---
+
+📁 STORAGE DESIGN (CRITICAL RULE)
+
+All files MUST be stored like:
+
+{bucket}/{username}/{category}/{filename}
+
+Buckets:
+
+* raw-assets
+* generated-output
+* images
+
+Structure:
+
+raw-assets/{username}/markdown/
+raw-assets/{username}/templates/
+
+generated-output/{username}/outputs/
+
+images/{username}/charts/
+images/{username}/unsplash/
+
+RULES:
+
+* NEVER store at root
+* ALWAYS include username
+* Supabase auto-creates folders (no manual step)
+* Always store FULL path in DB
+
+Example:
+raw-assets/test_user_123/markdown/1712345678_report.md
+
+---
+
+👤 USER DESIGN (MANDATORY)
+
+* Multi-user system
+* No hardcoding test_user_123
+* Always pass:
+  user_id
+  username
+
+Every service/agent must receive:
+{
+"user_id": "...",
+"username": "..."
+}
+
+---
+
+📁 BACKEND STRUCTURE
+
+config.py
+main.py
+
+services/
+supabase_client.py
+storage_service.py
+embedding_service.py
+auth_service.py
+user_service.py
+
+utils/
+markdown_parser.py
+table_parser.py
+chart_utils.py
+template_utils.py
+
+agents/
+ingestor_agent.py
+retriever_agent.py
+planner_agent.py
+content_agent.py
+chart_agent.py
+image_agent.py
+template_agent.py
+
+core/
+state.py
+graph.py
+
+routes/
+auth.py
+user.py
+upload.py
+generate.py
+
+tests/
+test_config.py
+test_auth.py
+test_supabase_storage.py
+test_ingestor.py
+test_parser.py
+test_chart.py
+
+---
+
+🤖 AGENT RULES
+
+Planner Agent = BRAIN (returns structured JSON)
+
+Template Agent = DETERMINISTIC (NO LLM)
+
+Chart Agent:
+
+* Reads tables_data
+* Generates matplotlib charts
+
+Image Agent:
+
+* Uses Unsplash API (ACCESS KEY only)
+
+---
+
+🧠 MARKDOWN PARSING RULE
+
+Markdown structure:
+
+# → document title
+
+## → sections
+
+### → subsections
+
+Tables → tables_data
+
+Do NOT chunk randomly
+Use hierarchy
+
+---
+
+⚙️ IMPLEMENTATION RULES
+
+When generating code:
+
+1. Mention prerequisites (DB / storage / env)
+2. Give FULL file code
+3. Follow folder structure strictly
+4. Use real DB relations
+5. Use username-based storage paths
+6. Include test file
+7. Include run command
+
+---
+
+🎯 OUTPUT EXPECTATION
+
+* Clean architecture
+* Working code
+* No hallucinated logic
+* Fully connected system
+* DB-aware, user-aware, storage-aware
+
+---
+
+REFERENCE CONTEXT:
+Use the structured system definition and schema described here: 
+
+---
+
+If anything is unclear:
+
+* Make reasonable assumption
+* But DO NOT break schema or storage rules
+
+```
