@@ -37,7 +37,7 @@ from logger import get_logger
 
 logger = get_logger(__name__)
 
-MAX_GROUPS = 8   # leaves room for planner to add intro + Q&A slides
+MAX_GROUPS = 12  # allows planner to select from more content (10-15 slide target)
 
 # ── Intent keyword signals ────────────────────────────────────────────────────
 _INTENT_KEYWORDS: list[tuple[str, list[str]]] = [

@@ -256,17 +256,35 @@ def _build_comparison_structure(bullets: list[str]) -> dict:
     }
 
 
-def _build_chart_structure(chart_data: dict) -> dict:
-    """Use existing chart data structure (from chart_agent)."""
-    if not chart_data or not chart_data.get("categories"):
+def _build_chart_structure(chart_entry: dict) -> dict:
+    """
+    Build chart visual structure from chart_agent's chart_entry.
+
+    chart_entry format (from chart_agent):
+        {
+            "chart_data":  {"title": ..., "categories": [...], "series": {...}, "chart_type": ...},
+            "chart_image": <bytes>,   # matplotlib PNG
+        }
+    """
+    if not chart_entry:
+        return {"type": "chart", "elements": []}
+
+    # Unwrap the nested "chart_data" dict produced by chart_agent
+    inner: dict = chart_entry.get("chart_data") or {}
+    categories = inner.get("categories", [])
+    series     = inner.get("series", {})
+    chart_type = inner.get("chart_type", "column")
+
+    if not categories and not chart_entry.get("chart_image"):
         return {"type": "chart", "elements": []}
 
     return {
-        "type": "chart",
-        "chart_type": "column",  # Can be enhanced based on data
+        "type":       "chart",
+        "chart_type": chart_type,
+        "has_image":  bool(chart_entry.get("chart_image")),
         "data": {
-            "categories": chart_data.get("categories", []),
-            "series": chart_data.get("series", {}),
+            "categories": categories,
+            "series":     series,
         },
     }
 
@@ -414,7 +432,14 @@ async def _compose_slide(
     message = await _extract_message(title, intent, bullets)
 
     # Step 2: Detect visual type
-    has_chart = bool(chart_data and chart_data.get("categories"))
+    # chart_data is {"chart_data": {...}, "chart_image": bytes} from chart_agent
+    _inner = (chart_data or {}).get("chart_data") or {}
+    has_chart = bool(
+        chart_data and (
+            chart_data.get("chart_image")
+            or _inner.get("categories")
+        )
+    )
     visual_type = _detect_visual_type(slide_data, has_chart)
 
     # Step 3: Build visual structure
@@ -425,7 +450,7 @@ async def _compose_slide(
     elif visual_type == "comparison":
         visual_structure = _build_comparison_structure(bullets)
     elif visual_type == "chart":
-        visual_structure = _build_chart_structure(chart_data or {})
+        visual_structure = _build_chart_structure(chart_data or {})  # chart_entry passed through
     elif visual_type == "centered":
         visual_structure = _build_centered_structure(bullets)
     elif visual_type == "left-text-right-visual":

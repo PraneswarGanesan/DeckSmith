@@ -1,9 +1,12 @@
 """
 Document Service — parses a Markdown string and stores the full structure to Supabase.
 
-Embedding + summary generation are DISABLED during parse by default to keep
-upload fast on low-RAM machines. BM25 keyword search works without embeddings.
-Set ENABLE_PARSE_EMBEDDINGS=true in .env to turn them on.
+Key improvements over original:
+  1. Uses the updated markdown_parser that captures section-level content (## level)
+     instead of dropping it silently.
+  2. Tables are attached to the subsection they physically appear within
+     (position-based), not cursor-sequentially.
+  3. Embedding + summary generation are opt-in (ENABLE_PARSE_EMBEDDINGS=true).
 """
 from __future__ import annotations
 
@@ -17,20 +20,14 @@ from core.database import (
     insert_table,
 )
 from utils.markdown_parser import parse_markdown
-from utils.table_parser import extract_tables
 from logger import get_logger
 
 logger = get_logger(__name__)
 
-# Opt-in: set ENABLE_PARSE_EMBEDDINGS=true in .env to generate embeddings at
-# upload time. On slow machines leave this false — embeddings are generated
-# lazily during the first pipeline run instead.
 _EMBEDDINGS_ON = os.getenv("ENABLE_PARSE_EMBEDDINGS", "false").lower() == "true"
-_TIMEOUT_EMBED = 15   # seconds — give up fast if Ollama is overloaded
-_TIMEOUT_LLM   = 20
 
 
-# ── Ollama helpers ────────────────────────────────────────────────────────────
+# ── Ollama / Gemini helpers ───────────────────────────────────────────────────
 
 async def _get_embedding(text: str) -> list[float] | None:
     if not _EMBEDDINGS_ON:
@@ -43,7 +40,7 @@ async def _get_embedding(text: str) -> list[float] | None:
 
 
 async def _summarise(title: str, content: str) -> str:
-    """1-sentence summary — skipped (local) when ENABLE_PARSE_EMBEDDINGS=false."""
+    """First-sentence summary — skipped (local) when ENABLE_PARSE_EMBEDDINGS=false."""
     if not _EMBEDDINGS_ON:
         for sentence in content.replace("\n", " ").split("."):
             sentence = sentence.strip()
@@ -82,35 +79,26 @@ def _extract_keywords(title: str, content: str) -> list[str]:
 
 async def parse_and_store_markdown(markdown_text: str) -> dict:
     """
-    Parse *markdown_text* and persist to Supabase.
+    Parse *markdown_text* and persist every section, subsection, and table to Supabase.
 
-    Fast path (default, ENABLE_PARSE_EMBEDDINGS=false):
-      • Keywords extracted locally (instant)
-      • Summary = first sentence of content (instant)
-      • No Ollama calls — upload completes in seconds
-      • BM25 search still works perfectly
-
-    Rich path (ENABLE_PARSE_EMBEDDINGS=true):
-      • Calls Ollama for per-subsection summaries + embeddings
-      • Enables semantic (cosine) search in addition to BM25
+    Tables are stored under the subsection they belong to (position-based),
+    not cursor-sequentially.
 
     Returns: {doc_id, doc_title, sections (int), subsections (int)}
     """
     if _EMBEDDINGS_ON:
-        logger.info("[DocService] Embedding mode ON — Ollama will be called per subsection")
+        logger.info("[DocService] Embedding mode ON — Ollama/Gemini will be called per subsection")
     else:
-        logger.info("[DocService] Fast mode — skipping Ollama at parse time (BM25 only)")
+        logger.info("[DocService] Fast mode — skipping embeddings at parse time (BM25 only)")
 
     parsed = parse_markdown(markdown_text)
-    all_tables = extract_tables(markdown_text)
 
     doc_title: str = parsed.get("title") or "Untitled"
     doc_id = insert_document(doc_title, executive_summary="")
     logger.info(f"[DocService] Created doc_id={doc_id} title='{doc_title}'")
 
-    section_count = 0
+    section_count    = 0
     subsection_count = 0
-    table_cursor = 0
 
     for section in parsed.get("sections", []):
         sec_id = insert_section(
@@ -121,38 +109,53 @@ async def parse_and_store_markdown(markdown_text: str) -> dict:
         section_count += 1
 
         for sub in section.get("subsections", []):
-            content = sub["content"].strip()
-            title   = sub["subsection_title"]
+            content  = sub["content"].strip()
+            title    = sub["subsection_title"]
+            # Remove table placeholder lines from content text
+            clean_content = "\n".join(
+                l for l in content.splitlines()
+                if not l.strip().startswith("[TABLE:")
+            ).strip()
 
-            summary   = await _summarise(title, content)   # fast or LLM
-            keywords  = _extract_keywords(title, content)  # always fast
-            embedding = await _get_embedding(f"{title} {content[:500]}")  # None if disabled
+            summary   = await _summarise(title, clean_content)
+            keywords  = _extract_keywords(title, clean_content)
+            embedding = await _get_embedding(f"{title} {clean_content[:500]}")
 
             sub_id = insert_subsection(
-                section_id=sec_id,
-                subsection_index=sub["subsection_index"],
-                subsection_title=title,
-                content=content,
-                summary=summary,
-                keywords=keywords,
-                embedding=embedding,
+                section_id        = sec_id,
+                subsection_index  = sub["subsection_index"],
+                subsection_title  = title,
+                content           = clean_content,
+                summary           = summary,
+                keywords          = keywords,
+                embedding         = embedding,
             )
             subsection_count += 1
             logger.debug(f"[DocService] Stored subsection '{title}'")
 
-            # Attach the next available markdown table to this subsection
-            if table_cursor < len(all_tables):
-                tbl = all_tables[table_cursor]
-                insert_table(sub_id, title, tbl["headers"], tbl["rows"])
-                table_cursor += 1
+            # ── Store tables that belong to THIS subsection (position-based) ──
+            for tbl in sub.get("tables", []):
+                try:
+                    insert_table(
+                        sub_id,
+                        tbl.get("table_title") or title,
+                        tbl["headers"],
+                        tbl["rows"],
+                    )
+                    logger.debug(
+                        f"[DocService] Stored table '{tbl.get('table_title', '')}' "
+                        f"for subsection '{title}'"
+                    )
+                except Exception as exc:
+                    logger.warning(f"[DocService] Table insert failed for '{title}': {exc}")
 
     logger.info(
         f"[DocService] Done — {section_count} sections, "
         f"{subsection_count} subsections stored for doc_id={doc_id}"
     )
     return {
-        "doc_id": doc_id,
-        "doc_title": doc_title,
-        "sections": section_count,
-        "subsections": subsection_count,
+        "doc_id":       doc_id,
+        "doc_title":    doc_title,
+        "sections":     section_count,
+        "subsections":  subsection_count,
     }

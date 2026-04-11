@@ -24,43 +24,46 @@ You are a senior presentation designer. Generate a COMPLETE, professional slide 
 
 Document topic: {query}
 
-Content sections available:
+Content sections available ({section_count} sections):
 {sections}
 
-MANDATORY SLIDE ORDER (follow exactly):
-  Slide 1 : AGENDA          → layout:"grid-2",   intent:"intro",      id:null
-  Slide 2 : INTRODUCTION    → layout:"left-text-right-visual", intent:"intro", pick best intro section id
-  Slides 3-5: CORE CONTENT  → pick 3 most important sections, use layout based on content type
-  Slide 6 : DATA/ANALYSIS   → layout:"chart" or "comparison", intent:"analysis", pick data-rich section
-  Slide 7 : SOLUTION/ACTION → layout:"process",  intent:"solution",   pick solution/recommendation section
-  Slide 8 : KEY HIGHLIGHT   → layout:"centered", intent:"results",    id:null  (one powerful insight)
-  Slide 9 : CONCLUSION      → layout:"centered", intent:"conclusion", id:null
-  Slide 10: Q&A             → layout:"centered", intent:"qna",        id:null
+MANDATORY SLIDE ORDER (generate 12-15 slides total):
+  Slide 1 : TITLE SLIDE     → layout:"centered",  intent:"intro",      id:null  (title + subtitle only)
+  Slide 2 : EXECUTIVE SUMMARY → layout:"grid-2",  intent:"intro",      id:null  (key numbers/stats)
+  Slide 3 : AGENDA           → layout:"grid-3",   intent:"intro",      id:null  (section overview)
+  Slides 4-10: CORE CONTENT  → cover ALL major sections in document order, mix layouts
+  Slide 11: DATA/ANALYSIS    → layout:"chart",    intent:"analysis",   pick the most data-rich section
+  Slide 12: KEY INSIGHTS     → layout:"grid-3",   intent:"results",    id:null
+  Slide 13: CONCLUSION       → layout:"centered", intent:"conclusion", id:null
+  Slide 14: THANK YOU / Q&A  → layout:"centered", intent:"qna",        id:null
 
 TITLE RULES:
-  • Action phrases only — verb + insight
+  • Action phrases only — verb + insight (not section headings)
   • Good: "Three Factors Drive 80% of Risk"   Bad: "Section 3 Overview"
-  • Good: "Regulation Mandates Action by Q4"  Bad: "Policy Introduction"
-  • Max 8 words. No section numbers.
+  • Good: "326 Acquisitions Unified Into One Vision"  Bad: "Executive Summary"
+  • Max 10 words. No section numbers. No generic labels.
 
 LAYOUT SELECTION:
-  "grid-2"                 : general content, overview, policy, two balanced columns
+  "grid-2"                 : two balanced columns, policy overview, general content
   "grid-3"                 : exactly 3 pillars/principles/categories
   "left-text-right-visual" : context, problem, risk — image placeholder on right
-  "process"                : steps, workflow, implementation sequence
-  "chart"                  : ANY slide with numbers, percentages, metrics, trends
-  "comparison"             : before/after, pros/cons, old vs new
-  "centered"               : highlight, conclusion, Q&A — single strong message
+  "process"                : ordered steps, workflow, implementation sequence
+  "chart"                  : ANY slide with numbers, percentages, metrics, trends, tables
+  "comparison"             : before/after, pros/cons, old vs new, two-sided analysis
+  "centered"               : title slide, highlight callout, conclusion, Q&A
 
 RULES:
-  • If a section has numbers/percentages/dates → use layout "chart" and type "chart"
-  • If a section compares things → use "comparison"
-  • If a section lists steps → use "process"
+  • Cover EVERY major section — no section should be silently dropped
+  • If a section has numbers/percentages/tables → layout "chart", type "chart"
+  • If a section compares two things → "comparison"
+  • If a section lists ordered steps → "process"
+  • If a section has exactly 3 pillars → "grid-3"
   • Each section id used AT MOST ONCE
-  • Agenda and Q&A always have id: null
+  • Slides 1, 2, 3, 12, 13, 14 always have id: null
+  • Distribute content evenly — aim for 12-15 total slides
 
 OUTPUT: JSON array only. Each item MUST have ALL these fields:
-  "title"          : string (action phrase, max 8 words)
+  "title"          : string (action phrase, max 10 words)
   "subsection_id"  : string id from list above, or null
   "type"           : "content" or "chart"
   "layout"         : one of the 7 layout types above
@@ -142,19 +145,27 @@ def _infer_layout(title: str, intent: str, position: int, total: int) -> str:
 
 def _build_fallback_plan(grouped: list[dict], query: str) -> list[dict]:
     """Create a sensible plan from grouped sections without LLM."""
-    agenda_bullets = " | ".join(g["title"] for g in grouped[:6])
+    agenda_bullets = " | ".join(g["title"] for g in grouped[:8])
     plan = [
+        {
+            "title":            query[:80],
+            "subsection_id":    None,
+            "type":             "content",
+            "layout":           "centered",
+            "intent":           "intro",
+            "combined_content": "",
+        },
         {
             "title":            "Agenda",
             "subsection_id":    None,
             "type":             "content",
-            "layout":           "grid-2",
+            "layout":           "grid-3",
             "intent":           "intro",
             "combined_content": agenda_bullets,
         },
     ]
-    total = min(len(grouped), 7) + 3
-    for i, group in enumerate(grouped[:7]):
+    total = min(len(grouped), 10) + 4
+    for i, group in enumerate(grouped[:10]):
         intent = group.get("intent", "content")
         layout = _infer_layout(group["title"], intent, i + 1, total)
         slide_type = "chart" if (group.get("has_table") and layout == "chart") else "content"
@@ -239,7 +250,11 @@ async def planner_node(state: dict) -> dict:
             f'| has_table: {g.get("has_table", False)} | snippet: "{snippet}..."'
         )
     sections_text = "\n".join(section_lines)
-    prompt = _PROMPT.format(query=query, sections=sections_text)
+    prompt = _PROMPT.format(
+        query=query,
+        sections=sections_text,
+        section_count=len(grouped),
+    )
 
     # Build a lookup map: id → group (so we can inject combined_content)
     group_map: dict[str, dict] = {g["id"]: g for g in grouped}
@@ -292,18 +307,39 @@ async def planner_node(state: dict) -> dict:
                 "combined_content": combined_content,
             })
 
-        # Cap at 10 content slides
-        validated = validated[:10]
+        # Cap at 15 slides (hackathon target: 10-15)
+        validated = validated[:15]
 
-        # Ensure slide 1 is AGENDA (no subsection_id, intent=intro)
-        if not validated or validated[0].get("intent") != "intro" or validated[0].get("subsection_id") is not None:
-            # Build agenda bullets from section titles
-            agenda_bullets = " | ".join(g["title"] for g in grouped[:6])
+        # Ensure first slide is TITLE slide
+        has_title_slide = (
+            validated and
+            validated[0].get("intent") == "intro" and
+            validated[0].get("layout") == "centered" and
+            validated[0].get("subsection_id") is None
+        )
+        if not has_title_slide:
             validated.insert(0, {
-                "title":            "Agenda",
+                "title":            query[:80],
                 "subsection_id":    None,
                 "type":             "content",
-                "layout":           "grid-2",
+                "layout":           "centered",
+                "intent":           "intro",
+                "combined_content": "",
+            })
+
+        # Ensure slide 2 is agenda-style (no subsection_id, intent=intro, grid layout)
+        has_agenda = any(
+            s.get("intent") == "intro" and s.get("layout") in ("grid-2", "grid-3")
+            and s.get("subsection_id") is None
+            for s in validated[1:4]
+        )
+        if not has_agenda:
+            agenda_bullets = " | ".join(g["title"] for g in grouped[:8])
+            validated.insert(1, {
+                "title":            "What We Cover Today",
+                "subsection_id":    None,
+                "type":             "content",
+                "layout":           "grid-3",
                 "intent":           "intro",
                 "combined_content": agenda_bullets,
             })

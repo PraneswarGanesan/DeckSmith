@@ -43,6 +43,7 @@ async def run_pipeline(
         "user_id": user_id,
         # Intermediate fields — empty at start
         "retrieved": [],
+        "grouped": [],          # populated by grouper_node
         "plan": [],
         "slides": [],
         "charts": [],

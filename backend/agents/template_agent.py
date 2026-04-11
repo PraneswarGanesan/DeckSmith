@@ -623,39 +623,83 @@ def _add_centered_slide(prs, title, bullets):
         top += Inches(0.65)
 
 
-def _add_chart_slide(prs, title, bullets, chart_data):
+def _add_chart_slide(prs, title, bullets, chart_entry: dict):
+    """
+    Render a chart slide.
+
+    Prefers a matplotlib PNG image (chart_entry["chart_image"]) over pptx
+    native charts for maximum visual quality and cross-viewer compatibility.
+    Falls back to pptx native chart, then bullet cards.
+
+    chart_entry can be either:
+      {"chart_image": bytes, "chart_data": {...}}   ← new format
+      {"categories": [...], "series": {...}}         ← legacy format (chart_data inline)
+    """
     slide = prs.slides.add_slide(_blank_layout(prs))
     _slide_header(slide, title)
-    cd = ChartData()
-    categories = chart_data.get("categories", [])
-    series_dict: dict = chart_data.get("series", {})
-    if not categories or not series_dict:
-        clean = [_sanitize(b) for b in bullets if b and _sanitize(b)][:5]
-        _render_bullet_cards(slide, Inches(0.5), Inches(1.25), SLIDE_W - Inches(1.0), clean)
-        return
-    cd.categories = [str(c) for c in categories]
-    for sname, vals in series_dict.items():
-        numeric_vals = []
-        for v in vals:
-            try:
-                numeric_vals.append(float(v))
-            except (TypeError, ValueError):
-                numeric_vals.append(0.0)
-        cd.add_series(str(sname), numeric_vals)
-    try:
-        chart_frame = slide.shapes.add_chart(
-            XL_CHART_TYPE.COLUMN_CLUSTERED,
-            Inches(0.5), Inches(1.15), Inches(8.5), Inches(5.9), cd,
-        )
-        chart_frame.chart.has_legend = len(series_dict) > 1
-        chart_frame.chart.chart_title.has_text_frame = False
-    except Exception as exc:
-        logger.warning(f"[Template] Chart insert failed: {exc}")
-    clean = [_sanitize(b) for b in bullets if b and _sanitize(b)][:4]
-    if clean:
-        panel_x = Inches(9.2)
-        _render_bullet_cards(slide, panel_x, Inches(1.25),
-                             SLIDE_W - panel_x - M_R, clean, SECONDARY)
+
+    # Normalise: handle both new {"chart_image":…} and old flat dict formats
+    if "chart_image" in chart_entry or "chart_data" in chart_entry:
+        chart_image = chart_entry.get("chart_image")
+        chart_data  = chart_entry.get("chart_data", {})
+    else:
+        chart_image = None
+        chart_data  = chart_entry  # legacy flat format
+
+    # ── Path 1: matplotlib PNG image (best quality) ───────────────────────
+    if chart_image:
+        try:
+            chart_left  = Inches(0.4)
+            chart_top   = Inches(1.15)
+            chart_width = Inches(8.8)
+            chart_h     = SLIDE_H - chart_top - M_B
+            slide.shapes.add_picture(
+                io.BytesIO(chart_image),
+                chart_left, chart_top, chart_width, chart_h,
+            )
+            # Bullets in right panel
+            clean = [_sanitize(b) for b in bullets if b and _sanitize(b)][:4]
+            if clean:
+                panel_x = Inches(9.4)
+                _render_bullet_cards(slide, panel_x, Inches(1.25),
+                                     SLIDE_W - panel_x - M_R, clean, SECONDARY)
+            return
+        except Exception as exc:
+            logger.warning(f"[Template] Chart image insert failed: {exc}")
+
+    # ── Path 2: pptx native chart (fallback) ─────────────────────────────
+    categories  = chart_data.get("categories", [])
+    series_dict = chart_data.get("series", {})
+    if categories and series_dict:
+        cd = ChartData()
+        cd.categories = [str(c) for c in categories]
+        for sname, vals in series_dict.items():
+            numeric_vals = []
+            for v in vals:
+                try:
+                    numeric_vals.append(float(v))
+                except (TypeError, ValueError):
+                    numeric_vals.append(0.0)
+            cd.add_series(str(sname), numeric_vals)
+        try:
+            chart_frame = slide.shapes.add_chart(
+                XL_CHART_TYPE.COLUMN_CLUSTERED,
+                Inches(0.5), Inches(1.15), Inches(8.5), Inches(5.9), cd,
+            )
+            chart_frame.chart.has_legend = len(series_dict) > 1
+            chart_frame.chart.chart_title.has_text_frame = False
+            clean = [_sanitize(b) for b in bullets if b and _sanitize(b)][:4]
+            if clean:
+                panel_x = Inches(9.2)
+                _render_bullet_cards(slide, panel_x, Inches(1.25),
+                                     SLIDE_W - panel_x - M_R, clean, SECONDARY)
+            return
+        except Exception as exc:
+            logger.warning(f"[Template] pptx native chart insert failed: {exc}")
+
+    # ── Path 3: bullet cards fallback ────────────────────────────────────
+    clean = [_sanitize(b) for b in bullets if b and _sanitize(b)][:5]
+    _render_bullet_cards(slide, Inches(0.5), Inches(1.25), SLIDE_W - Inches(1.0), clean)
 
 
 def _add_table_slide(prs, title, table_data):
@@ -1006,7 +1050,12 @@ def _dispatch_slide(
     # ── LEGACY: Bullet-based rendering (fallback for old data) ──────────
     try:
         # ── Chart layout ─────────────────────────────────────────────────────
-        if layout == "chart" or (slide_type == "chart" and chart_data.get("categories")):
+        has_chart = bool(
+            chart_data.get("chart_image") or
+            chart_data.get("chart_data") or
+            chart_data.get("categories")
+        )
+        if layout == "chart" or (slide_type == "chart" and has_chart):
             _add_chart_slide(prs, title, bullets, chart_data)
 
         # ── Process layout ───────────────────────────────────────────────────
@@ -1125,45 +1174,38 @@ async def template_node(state: dict) -> dict:
         layout_map = {"title": 0, "content": 0, "two_col": 0, "picture": 0, "blank": 0}
 
     # ── Title slide ───────────────────────────────────────────────────────────
-    try:
-        if use_template_layouts:
-            _add_template_title_slide(
-                prs, layout_map["title"], query,
-                "AI-Generated Presentation  |  DeckSmith"
-            )
-        else:
-            _add_title_slide(prs, query, "AI-Generated Presentation  |  DeckSmith")
-    except Exception as exc:
-        logger.warning(f"[Template] Title slide failed: {exc}")
+    # Only add an auto title slide when the planner did NOT already include one
+    # (planner now always adds a centered intent="intro" slide as slide 1).
+    first_is_title = (
+        slides_data and
+        slides_data[0].get("intent") == "intro" and
+        slides_data[0].get("layout") == "centered" and
+        not slides_data[0].get("subsection_id")
+    )
+    if not first_is_title:
         try:
-            _add_title_slide(prs, query, "")
-        except Exception:
-            pass
+            if use_template_layouts:
+                _add_template_title_slide(
+                    prs, layout_map["title"], query,
+                    "AI-Generated Presentation  |  DeckSmith"
+                )
+            else:
+                _add_title_slide(prs, query, "AI-Generated Presentation  |  DeckSmith")
+        except Exception as exc:
+            logger.warning(f"[Template] Auto title slide failed: {exc}")
 
     # ── Content slides ────────────────────────────────────────────────────────
+    # NOTE: Table slides are NOT rendered separately at the end anymore.
+    # Tables that belong to a slide are embedded as charts via the chart_agent,
+    # so they appear in the correct position within the narrative.
     for i, slide_data in enumerate(slides_data):
-        chart_data = charts[i] if i < len(charts) else {}
-        image_url  = images.get(str(i))
+        chart_entry = charts[i] if i < len(charts) else {}
+        image_url   = images.get(str(i))
 
         _dispatch_slide(
             prs, layout_map, slide_data, i,
-            chart_data, image_url, use_template_layouts,
+            chart_entry, image_url, use_template_layouts,
         )
-
-    # ── Table slides ──────────────────────────────────────────────────────────
-    seen_sub_ids: set[str] = set()
-    for slide in slides_data:
-        sub_id = slide.get("subsection_id")
-        if not sub_id or sub_id in seen_sub_ids:
-            continue
-        seen_sub_ids.add(sub_id)
-        try:
-            from core.database import get_tables_for_subsection
-            tables = get_tables_for_subsection(sub_id)
-            for tbl in tables[:1]:
-                _add_table_slide(prs, slide.get("title", "Data"), tbl)
-        except Exception as exc:
-            logger.warning(f"[Template] Table slide skipped: {exc}")
 
     # ── Serialise + upload ────────────────────────────────────────────────────
     buf = io.BytesIO()

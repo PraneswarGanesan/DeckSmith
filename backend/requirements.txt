@@ -16,8 +16,12 @@ langchain-core>=0.3.0
 rank-bm25>=0.2.2
 numpy>=2.1.0
 
-# PPTX generation (native charts — no matplotlib needed)
+# PPTX generation
 python-pptx>=1.0.0
+
+# Chart image generation (high-quality PNG charts embedded as pictures)
+matplotlib>=3.9.0
+lxml>=5.0.0
 
 # Utilities
 tqdm>=4.66.0
