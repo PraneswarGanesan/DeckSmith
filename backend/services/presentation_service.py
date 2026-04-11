@@ -48,6 +48,7 @@ async def run_pipeline(
         "slides": [],
         "charts": [],
         "images": {},
+        "template_schema": [],
         "critiqued_slides": [],
         "pptx_bytes": b"",
         "error": None,

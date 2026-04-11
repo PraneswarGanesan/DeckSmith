@@ -25,7 +25,10 @@ from logger import get_logger
 logger = get_logger(__name__)
 
 # ── Provider selection ────────────────────────────────────────────────────────
-PROVIDER = os.getenv("LLM_PROVIDER", "ollama").lower()   # "ollama" | "gemini"
+PROVIDER = os.getenv("LLM_PROVIDER", "ollama").lower()   # "ollama" | "gemini" | "openrouter"
+
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_MODEL   = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
 
 GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY", "")
 GEMINI_LLM_MODEL = os.getenv("GEMINI_LLM_MODEL", "gemini-2.0-flash")
@@ -38,6 +41,33 @@ if PROVIDER == "gemini" and not GEMINI_API_KEY:
     )
 
 logger.info(f"[LLM] Provider = {PROVIDER.upper()}")
+
+
+# ── OpenRouter ────────────────────────────────────────────────────────────────
+
+async def _openrouter_generate(
+    prompt: str,
+    temperature: float = 0.3,
+    max_tokens: int = 1024,
+) -> str:
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "HTTP-Referer": "http://localhost:5000",
+        "X-Title": "DeckSmith",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": OPENROUTER_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(url, headers=headers, json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+        return data["choices"][0]["message"]["content"]
 
 
 # ── Gemini ────────────────────────────────────────────────────────────────────
@@ -121,7 +151,9 @@ async def generate(
     max_tokens: int = 1024,
 ) -> str:
     """Generate text from a prompt. Raises on hard failure."""
-    if PROVIDER == "gemini":
+    if PROVIDER == "openrouter":
+        return await _openrouter_generate(prompt, temperature, max_tokens)
+    elif PROVIDER == "gemini":
         return await _gemini_generate(prompt, temperature, max_tokens)
     return await _ollama_generate(prompt, temperature, max_tokens)
 

@@ -1,31 +1,28 @@
 """
 Section Grouper Agent — merges fragmented RAG chunks into coherent slide groups.
 
-Problem solved:
-  RAG returns individual subsections as isolated chunks.  The same section
-  can appear multiple times as separate results, producing slides that look like:
-    "10.2 Stress Testing..."
-    "10.2 Stress Testing..."   ← duplicate
-    "10.2 Stress Testing..."   ← duplicate again
+Design Philosophy:
+  NO artificial caps.  NO content truncation.  The LLM planner is smart enough
+  to decide what to include.  Our job is to:
+    1. Group subsections by parent section (natural document boundary)
+    2. Merge content within each group into one coherent block
+    3. Deduplicate by content fingerprint
+    4. Classify intent (intro / problem / analysis / solution / …)
+    5. Sort by document order with story-arc as tiebreaker
 
-  This node eliminates that by:
-  1. Grouping chunks by parent section_id (natural document boundary)
-  2. Merging content within each group into one coherent block
-  3. Deduplicating across groups by content fingerprint
-  4. Classifying each group's semantic INTENT (intro / problem / analysis / …)
-  5. Mapping intent → best layout type
-  6. Capping at MAX_GROUPS to prevent slide explosion
+  The full content is passed downstream — the planner + content agent
+  will distill it into presentation-ready material.
 
 Output per group:
   {
-    "id"               : primary subsection id (real DB id, usable by content agent)
+    "id"               : primary subsection id
     "all_ids"          : all subsection ids merged into this group
     "section_id"       : parent section id
     "title"            : clean, presentation-ready title
     "raw_title"        : original subsection title (for debug)
-    "combined_content" : merged content text (≤3000 chars)
-    "intent"           : intro | problem | analysis | solution | policy | results | content
-    "layout"           : matching layout type for template agent
+    "combined_content" : merged content text (NO truncation)
+    "intent"           : intro | problem | analysis | solution | policy | results | conclusion | content
+    "layout"           : suggested layout type for template agent
     "has_table"        : True if any subsection in group has table data
     "keywords"         : merged keywords list
   }
@@ -36,8 +33,6 @@ import re
 from logger import get_logger
 
 logger = get_logger(__name__)
-
-MAX_GROUPS = 12  # allows planner to select from more content (10-15 slide target)
 
 # ── Intent keyword signals ────────────────────────────────────────────────────
 _INTENT_KEYWORDS: list[tuple[str, list[str]]] = [
@@ -69,14 +64,14 @@ _INTENT_KEYWORDS: list[tuple[str, list[str]]] = [
 
 # Intent → ideal layout
 _INTENT_LAYOUT: dict[str, str] = {
-    "intro":      "grid-2",
+    "intro":      "centered",
     "problem":    "left-text-right-visual",
     "analysis":   "comparison",
     "solution":   "process",
-    "policy":     "grid-2",
-    "results":    "comparison",
+    "policy":     "grid",
+    "results":    "metrics",
     "conclusion": "centered",
-    "content":    "grid-2",
+    "content":    "grid",
 }
 
 # Story arc sort order (intro first, conclusion last)
@@ -96,10 +91,10 @@ _INTENT_ORDER: dict[str, int] = {
 
 def _classify_intent(title: str, content: str) -> str:
     """
-    Classify semantic intent from title + first 500 chars of content.
+    Classify semantic intent from title + first 800 chars of content.
     Returns the intent with the most keyword hits (or 'content' if none).
     """
-    text = f"{title} {content[:500]}".lower()
+    text = f"{title} {content[:800]}".lower()
     best_intent = "content"
     best_score  = 0
 
@@ -114,13 +109,13 @@ def _classify_intent(title: str, content: str) -> str:
 
 def _clean_title(raw: str) -> str:
     """
-    Strip numeric prefixes and truncate to 8 words.
+    Strip numeric prefixes and truncate to 10 words.
     '10.2 Stress Testing Methodology' → 'Stress Testing Methodology'
     """
     title = re.sub(r"^\d+(\.\d+)*\.?\s+", "", raw.strip())
     words = title.split()
-    if len(words) > 8:
-        title = " ".join(words[:8])
+    if len(words) > 10:
+        title = " ".join(words[:10])
     return title.strip().capitalize() or "Content Slide"
 
 
@@ -175,7 +170,7 @@ async def grouper_node(state: dict) -> dict:
         # Primary = subsection with most content (richest source)
         primary = max(unique_subs, key=lambda x: len(x.get("content", "")))
 
-        # Merge content
+        # Merge content — NO TRUNCATION.  The full text flows to the planner.
         content_parts = [
             s.get("content", "").strip()
             for s in unique_subs
@@ -195,10 +190,9 @@ async def grouper_node(state: dict) -> dict:
         # All titles for classification
         all_titles = " ".join(s.get("subsection_title", "") for s in unique_subs)
         intent = _classify_intent(all_titles, combined_content)
-        layout = _INTENT_LAYOUT.get(intent, "grid-2")
+        layout = _INTENT_LAYOUT.get(intent, "grid")
 
         # has_table = at least one subsection had non-empty keywords proxy
-        # (The real signal is from get_tables_for_subsection, checked later by chart agent)
         has_table = any(bool(s.get("keywords")) for s in unique_subs)
 
         grouped.append({
@@ -207,32 +201,26 @@ async def grouper_node(state: dict) -> dict:
             "section_id":       section_id,
             "title":            _clean_title(primary.get("subsection_title", "Section")),
             "raw_title":        primary.get("subsection_title", ""),
-            "combined_content": combined_content[:3000],   # cap for LLM context
+            "combined_content": combined_content,   # ← NO truncation. Full content.
             "intent":           intent,
             "layout":           layout,
             "has_table":        has_table,
-            "keywords":         merged_keywords[:20],
+            "keywords":         merged_keywords,     # ← NO cap on keywords
             # Pass through so content agent can use without extra DB fetch
             "subsection_index": int(primary.get("subsection_index", 0)),
         })
 
-    # ── Step 3: trim to MAX_GROUPS ────────────────────────────────────────────
-    if len(grouped) > MAX_GROUPS:
-        logger.info(f"[Grouper] {len(grouped)} groups → trimming to {MAX_GROUPS}")
-        # Prefer content-rich groups; always keep the first (likely intro)
-        first = grouped[:1]
-        rest  = sorted(grouped[1:], key=lambda x: len(x["combined_content"]), reverse=True)
-        grouped = (first + rest)[: MAX_GROUPS]
+    # ── Step 3: NO trimming — ALL groups pass through ────────────────────────
+    # The LLM planner is responsible for selecting which groups become slides.
+    # We do NOT artificially cap the number of groups.
 
     # ── Step 4: sort by document order (story arc as secondary) ──────────────
-    # Primary key: original document position (subsection_index of primary sub)
-    # Secondary key: intent story-arc order (for items with the same position)
     grouped.sort(
         key=lambda x: (x.get("subsection_index", 0), _INTENT_ORDER.get(x["intent"], 3))
     )
 
     logger.info(
-        f"[Grouper] → {len(grouped)} groups | "
+        f"[Grouper] → {len(grouped)} groups (NO cap applied) | "
         f"intents: {[g['intent'] for g in grouped]} | "
         f"layouts: {[g['layout'] for g in grouped]}"
     )

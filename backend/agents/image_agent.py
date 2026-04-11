@@ -1,11 +1,12 @@
 """
-Image Agent — fetches relevant images from Unsplash for slides that can show them.
+Image Agent — fetches contextually relevant images from Unsplash.
 
-Strategy:
-  - Skip slides whose layout/intent never shows images (title, chart, centered, qna)
-  - Fetch in parallel (capped to 5 concurrent calls to respect Unsplash rate limits)
-  - Build a rich search query from slide title + overall query for relevance
-  - Store as images[str(slide_index)] = URL (consumed by template_agent)
+Design Philosophy:
+  Images must feel INTENTIONAL, not generic.  Strategy:
+    1. Build rich search queries from slide content keywords (not just title)
+    2. Use a fallback strategy: specific → topic-level → abstract
+    3. Skip slides that don't benefit from images
+    4. Cache queries to avoid duplicate API calls
 """
 from __future__ import annotations
 
@@ -16,22 +17,25 @@ from logger import get_logger
 
 logger = get_logger(__name__)
 
-# Layouts/intents that cannot render an image — skip them to save quota
-_NO_IMAGE_LAYOUTS = {"title", "chart", "centered", "qna", "agenda"}
-_NO_IMAGE_INTENTS = {"intro", "qna", "conclusion"}
+# Layouts/intents that should NOT have images
+_NO_IMAGE_TYPES = {"chart", "metrics", "centered", "timeline"}
+_NO_IMAGE_INTENTS = {"intro", "conclusion"}
 
 # Max concurrent Unsplash calls (free tier: 50 req/hour)
 _SEMAPHORE = asyncio.Semaphore(5)
 
+# Query cache to avoid duplicate API calls
+_query_cache: dict[str, str | None] = {}
+
 
 async def _unsplash_url(query: str) -> str | None:
-    """
-    Fetch a single high-quality landscape image from Unsplash.
-
-    Returns: image URL string, or None if request fails / no results.
-    """
+    """Fetch a single high-quality landscape image from Unsplash."""
     if not query:
         query = "business presentation professional"
+
+    # Check cache
+    if query in _query_cache:
+        return _query_cache[query]
 
     async with _SEMAPHORE:
         try:
@@ -53,105 +57,130 @@ async def _unsplash_url(query: str) -> str | None:
                 if results:
                     url = results[0].get("urls", {}).get("regular")
                     if url:
+                        _query_cache[query] = url
                         logger.debug(f"[Image] Got URL for '{query[:60]}': {url[:60]}…")
                         return url
-                    logger.warning(f"[Image] No 'regular' URL in result for '{query[:50]}'")
-                else:
-                    logger.debug(f"[Image] No Unsplash results for '{query[:60]}'")
 
         except httpx.TimeoutException:
             logger.warning(f"[Image] Unsplash timeout for '{query[:50]}'")
         except httpx.HTTPStatusError as exc:
             logger.warning(f"[Image] Unsplash HTTP {exc.response.status_code} for '{query[:50]}'")
-        except httpx.HTTPError as exc:
-            logger.warning(f"[Image] Unsplash HTTP error for '{query[:50]}': {exc}")
         except Exception as exc:
             logger.warning(f"[Image] Unsplash error for '{query[:50]}': {type(exc).__name__}: {exc}")
 
+    _query_cache[query] = None
     return None
 
 
 def _should_fetch_image(slide: dict) -> bool:
-    """Return True if this slide's layout can render an image."""
-    layout = (slide.get("layout") or "").lower()
+    """Return True if this slide's layout can benefit from an image."""
+    visual_type = (slide.get("visual_type") or slide.get("layout") or "").lower()
     intent = (slide.get("intent") or "").lower()
-    stype  = (slide.get("type")   or "").lower()
+    stype = (slide.get("type") or "").lower()
 
-    if layout in _NO_IMAGE_LAYOUTS:
-        return False
-    if intent in _NO_IMAGE_INTENTS and layout not in ("left-text-right-visual", "grid-2"):
+    if visual_type in _NO_IMAGE_TYPES:
         return False
     if stype == "chart":
         return False
-    return True
+    if intent in _NO_IMAGE_INTENTS and visual_type != "left-text-right-visual":
+        return False
+
+    # Images work best with: grid, left-text-right-visual, cards
+    return visual_type in ("grid", "left-text-right-visual", "cards", "comparison")
 
 
-def _build_query(slide: dict, overall_query: str) -> str:
-    """Build an Unsplash search query from slide context."""
-    title = (slide.get("title") or "business").strip()
+def _build_queries(slide: dict, overall_query: str) -> list[str]:
+    """
+    Build a LIST of Unsplash search queries from slide context.
+    Returns most-specific first, with fallbacks.
+    """
+    title = (slide.get("title") or "").strip()
+    design_intent = (slide.get("design_intent") or "").strip()
+    data_extract = (slide.get("data_extract") or "").strip()
+    intent = (slide.get("intent") or "").strip()
 
-    # Combine topic + slide title for specificity
-    if overall_query and overall_query.lower() not in title.lower():
-        query = f"{overall_query} {title} professional"
-    else:
-        query = f"{title} professional corporate"
+    queries = []
 
-    return query[:120]  # Unsplash ignores very long queries
+    # Most specific: title + design intent keywords
+    if design_intent:
+        # Extract key concepts from design_intent
+        concepts = " ".join(w for w in design_intent.split() if len(w) > 3)[:60]
+        queries.append(f"{concepts} professional corporate")
+
+    # Specific: title + topic
+    if title and overall_query:
+        queries.append(f"{title} {overall_query} professional")
+
+    # Medium: just the title
+    if title:
+        queries.append(f"{title} business corporate")
+
+    # Broad: overall topic
+    if overall_query:
+        queries.append(f"{overall_query} professional presentation")
+
+    # Ultra-broad fallback by intent
+    intent_queries = {
+        "problem": "business challenge risk analytics",
+        "analysis": "data analytics business chart",
+        "solution": "innovation technology solution",
+        "policy": "governance compliance regulation",
+        "results": "business growth success achievement",
+    }
+    if intent in intent_queries:
+        queries.append(intent_queries[intent])
+
+    # Last resort
+    queries.append("professional business presentation")
+
+    return queries[:4]  # max 4 attempts
 
 
 async def image_node(state: dict) -> dict:
     """
-    Fetch images from Unsplash for every slide that can display one.
+    Fetch contextually relevant images for slides.
 
     Reads:  state["slides"], state["query"]
-    Writes: state["images"]  — dict[str(slide_index), url]
-            state["error"]   — None on success
+    Writes: state["images"] — dict[str(slide_index), url]
     """
     slides: list[dict] = state.get("slides", [])
     images: dict[str, str] = {}
 
     if not slides:
-        logger.warning("[Image] No slides available for image fetching")
         return {"images": images, "error": None}
 
     overall_query: str = state.get("query", "").strip()
 
-    # Determine eligible slides and build fetch tasks
-    eligible: list[tuple[int, str]] = []  # (slide_index, search_query)
+    # Determine eligible slides
+    eligible: list[tuple[int, list[str]]] = []
     for i, slide in enumerate(slides):
         if _should_fetch_image(slide):
-            q = _build_query(slide, overall_query)
-            eligible.append((i, q))
-            logger.debug(f"[Image] Slide {i} eligible: '{q[:70]}'")
-        else:
-            logger.debug(
-                f"[Image] Slide {i} skipped "
-                f"(layout={slide.get('layout')!r}, intent={slide.get('intent')!r})"
-            )
+            queries = _build_queries(slide, overall_query)
+            eligible.append((i, queries))
 
-    logger.info(
-        f"[Image] Fetching images for {len(eligible)}/{len(slides)} eligible slides"
-    )
+    logger.info(f"[Image] Fetching images for {len(eligible)}/{len(slides)} eligible slides")
 
     if not eligible:
         return {"images": images, "error": None}
 
-    # Fetch in parallel (semaphore inside _unsplash_url limits concurrency)
-    async def _fetch(idx: int, query: str) -> tuple[int, str | None]:
-        url = await _unsplash_url(query)
-        return idx, url
+    # Fetch with fallback strategy
+    async def _fetch_with_fallback(idx: int, queries: list[str]) -> tuple[int, str | None]:
+        for query in queries:
+            url = await _unsplash_url(query)
+            if url:
+                return idx, url
+        return idx, None
 
-    results = await asyncio.gather(*[_fetch(i, q) for i, q in eligible])
+    results = await asyncio.gather(*[_fetch_with_fallback(i, q) for i, q in eligible])
 
     for idx, url in results:
         if url:
             images[str(idx)] = url
             logger.info(f"[Image] Slide {idx}: image fetched")
         else:
-            logger.debug(f"[Image] Slide {idx}: no image found")
+            logger.debug(f"[Image] Slide {idx}: no image found (all queries exhausted)")
 
     logger.info(
-        f"[Image] Done — {len(images)}/{len(eligible)} images fetched "
-        f"(keys: {sorted(images.keys(), key=int)})"
+        f"[Image] Done — {len(images)}/{len(eligible)} images fetched"
     )
     return {"images": images, "error": None}
