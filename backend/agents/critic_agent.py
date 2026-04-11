@@ -1,19 +1,16 @@
 """
-Critic Agent — design-aware quality review of every slide.
+Critic Agent V2 — The Best Design Selector.
 
 Design Philosophy:
-  The critic is an ART DIRECTOR reviewing slide copy before a client presentation.
-  It enforces:
-    - 10-word max per bullet (tighter than the old 12-word rule)
-    - Impact-formatted numbers ($5.2B not $5,200,000,000)
-    - Strong verb or key number at the start of every bullet
-    - No redundancy — every bullet adds unique value
-    - Preserves ALL metadata (visual_type, design_intent, data_extract, etc.)
+  Replaces textual proofreading with visual architecture evaluation.
+  Receives 3 blueprint variants for a slide and grades them on Balance,
+  Hierarchy, and Contrast utilization to automatically select the optimal composition.
 """
 from __future__ import annotations
 
 import json
 import re
+import asyncio
 
 from core.llm import generate
 from logger import get_logger
@@ -21,79 +18,76 @@ from logger import get_logger
 logger = get_logger(__name__)
 
 _CRITIC_PROMPT = """\
-You are an ART DIRECTOR reviewing slide copy for a Fortune 500 client presentation.
-Polish the bullet points below to perfection.
+You are an ELITE PRESENTATION DESIGN DIRECTOR. 
+Your job is to evaluate 3 layout variations for a single slide's data and auto-select the best one.
 
-Slide Title: {title}
-Visual Type: {visual_type}
-Current Bullets:
-{bullets}
+EVALUATION CRITERIA:
+1. Balance: Is the density appropriate for the slide intent? (e.g. Intro = low density)
+2. Hierarchy: Does the primary data node get the highest priority?
+3. Formatting: Is the composition aligned with Hackathon Awwwards-level design principles?
 
-MANDATORY QUALITY RULES:
-1. Keep exactly the same number of bullets (max 6)
-2. Each bullet: MAX 10 WORDS.  Ruthlessly cut filler.
-3. Start each bullet with a STRONG VERB (Drive, Achieve, Deploy, Target, Scale) or KEY NUMBER ($5.2B, 76%, 3x)
-4. Format numbers for IMPACT:
-   - Large currency → "$252B" not "$252,300,000,000"
-   - Percentages → "76% growth" not "76.4 percent growth rate"
-   - Multiples → "3x increase" not "a three-fold increase"
-5. Remove redundancy — every bullet adds UNIQUE value
-6. NO passive voice.  NO filler (basically, very, currently, essentially).
-7. Make language CRISP and SCAN-FRIENDLY — a CEO should grasp each bullet in 2 seconds.
-8. Do NOT add new topics not present in the original.
+SLIDE INTENT: {intent}
+VARIANTS TO EVALUATE:
+{variants}
 
-Return ONLY a JSON array of improved bullet strings. No markdown, no explanation.
+OUTPUT FORMAT:
+Return exactly one JSON object:
+{{
+  "selected_variant_id": "A",
+  "reasoning": "Variant A properly anchors the large $252B metric into a hero-grid..."
+}}
+Return ONLY JSON without markdown fences.
 """
 
+def _extract_json_obj(raw: str) -> dict:
+    raw = raw.strip()
+    raw = re.sub(r"```(?:json)?\s*", "", raw)
+    raw = re.sub(r"```\s*$", "", raw)
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start != -1 and end > start:
+        try:
+            return json.loads(raw[start:end + 1])
+        except Exception:
+            pass
+    return {}
+
+async def _evaluate_slide_variants(slide: dict) -> dict:
+    variants = slide.get("variants", [])
+    if not variants:
+        logger.warning(f"No variants for slide '{slide.get('title')}'. Using default.")
+        slide["composed_blueprint"] = {}
+        return slide
+    
+    # If fallback hit
+    if len(variants) == 1:
+        slide["composed_blueprint"] = variants[0]
+        return slide
+        
+    variants_str = json.dumps(variants, indent=2)
+    prompt = _CRITIC_PROMPT.format(intent=slide.get("intent", "content"), variants=variants_str)
+    
+    try:
+        raw = await generate(prompt, temperature=0.1, max_tokens=300)
+        eval_data = _extract_json_obj(raw)
+        sel_id = eval_data.get("selected_variant_id", "A")
+        
+        # Select matching variant
+        chosen = next((v for v in variants if v.get("variant_id") == sel_id), variants[0])
+        slide["composed_blueprint"] = chosen
+        slide["design_reasoning"] = eval_data.get("reasoning", "")
+    except Exception as e:
+        logger.error(f"[Critic] Evaluation failed: {e}")
+        slide["composed_blueprint"] = variants[0]
+        
+    return slide
 
 async def critic_node(state: dict) -> dict:
-    """
-    Design-aware quality review of all slides.
-
-    Reads:  state["slides"]
-    Writes: state["critiqued_slides"] — refined slides with ALL metadata preserved.
-    """
-    slides: list[dict] = state.get("slides", [])
-    logger.info(f"[Critic] Reviewing {len(slides)} slides")
-    critiqued: list[dict] = []
-
-    for slide in slides:
-        bullets = slide.get("content", [])
-
-        # Skip slides with no bullets (title/conclusion slides)
-        if not bullets:
-            critiqued.append(slide)
-            continue
-
-        visual_type = slide.get("visual_type", slide.get("layout", "grid"))
-        bullet_text = "\n".join(f"- {b}" for b in bullets)
-        prompt = _CRITIC_PROMPT.format(
-            title=slide.get("title", ""),
-            visual_type=visual_type,
-            bullets=bullet_text,
-        )
-
-        try:
-            raw = await generate(prompt, temperature=0.2, max_tokens=512)
-
-            # Robustly extract JSON array
-            raw_clean = re.sub(r"```(?:json)?\s*", "", raw.strip())
-            raw_clean = re.sub(r"```\s*$", "", raw_clean)
-
-            start = raw_clean.find("[")
-            end = raw_clean.rfind("]")
-            if start != -1 and end > start:
-                improved: list[str] = json.loads(raw_clean[start:end + 1])
-                # Quality filter: only accept clean string bullets with 2+ words
-                clean = [b for b in improved if isinstance(b, str) and len(b.split()) >= 2]
-                if clean:
-                    # PRESERVE all metadata — only replace content
-                    slide = {**slide, "content": clean[:6]}
-
-        except Exception as exc:
-            logger.warning(f"[Critic] Skipping '{slide.get('title', '?')}': {exc}")
-
-        critiqued.append(slide)
-
-    logger.info("[Critic] Review complete")
-    return {"critiqued_slides": critiqued, "error": None}
+    """Design-selector for every slide blueprint."""
+    logger.info("[Critic V2] Grading layout compositions.")
+    slides = state.get("slides", [])
+    
+    tasks = [_evaluate_slide_variants(s) for s in slides]
+    critiqued_slides = await asyncio.gather(*tasks)
+    
+    return {"critiqued_slides": critiqued_slides, "error": None}

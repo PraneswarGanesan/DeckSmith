@@ -535,6 +535,16 @@ async def test_pipeline_with_template(doc_id: str, template_name: str) -> bool:
         status      = record.get("status", "")
         output_path = record.get("output_path", "")
 
+        from services.storage_service import download_file
+        # Download from supabase and write locally so user can inspect it
+        try:
+            pptx_b = download_file("generated-output", f"{output_id}.pptx")
+            local_file = OUTPUT_DIR / f"{template_name}_output.pptx"
+            local_file.write_bytes(pptx_b)
+            print(f"      Saved locally to: {local_file}")
+        except Exception as e:
+            print(f"      Failed to save locally: {e}")
+
         success = status == "complete" and bool(output_path)
 
         runner.report(TestResult(

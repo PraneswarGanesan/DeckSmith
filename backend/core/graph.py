@@ -40,7 +40,8 @@ def build_pipeline() -> object:
     from agents.retriever_agent import retriever_node
     from agents.grouper_agent import grouper_node
     from agents.planner_agent import planner_node
-    from agents.content_agent import content_node
+    from agents.data_extractor_agent import data_extractor_node
+    from agents.blueprint_agent import blueprint_node
     from agents.chart_agent import chart_node
     from agents.image_agent import image_node
     from agents.critic_agent import critic_node
@@ -54,7 +55,8 @@ def build_pipeline() -> object:
     graph.add_node("retriever",       retriever_node)
     graph.add_node("grouper",         grouper_node)
     graph.add_node("planner",         planner_node)
-    graph.add_node("content",         content_node)
+    graph.add_node("data_extractor",  data_extractor_node)
+    graph.add_node("blueprint",       blueprint_node)
     graph.add_node("chart",           chart_node)
     graph.add_node("image",           image_node)
     graph.add_node("critic",          critic_node)
@@ -66,18 +68,19 @@ def build_pipeline() -> object:
     graph.set_entry_point("retriever")
     graph.add_edge("retriever",       "grouper")
     graph.add_edge("grouper",         "planner")
-    graph.add_edge("planner",         "content")
-    graph.add_edge("content",         "chart")
-    graph.add_edge("chart",           "image")
-    graph.add_edge("image",           "critic")
+    graph.add_edge("planner",         "data_extractor")
+    graph.add_edge("data_extractor",  "blueprint")
+    graph.add_edge("blueprint",       "critic")
     graph.add_edge("critic",          "validator")
     graph.add_edge("validator",       "template_analyzer")
     graph.add_edge("template_analyzer", "visual_composer")
-    graph.add_edge("visual_composer", "template")
+    graph.add_edge("visual_composer", "chart")
+    graph.add_edge("chart",           "image")
+    graph.add_edge("image",           "template")
     graph.add_edge("template",        END)
 
     compiled = graph.compile()
-    logger.info("LangGraph pipeline compiled successfully (11 nodes: retriever→grouper→planner→content→chart→image→critic→validator→template_analyzer→visual_composer→template)")
+    logger.info("LangGraph pipeline compiled successfully (sequential)")
     return compiled
 
 

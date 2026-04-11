@@ -99,6 +99,7 @@ def _render_native_slide(prs: Presentation, slide_data: dict, slide_idx: int, im
     
     # We map by the placeholder's 'idx' integer
     ph_dict = {shape.placeholder_format.idx: shape for shape in slide.placeholders}
+    image_handled = False
     
     for str_idx, content in mappings.items():
         try:
@@ -110,12 +111,29 @@ def _render_native_slide(prs: Presentation, slide_data: dict, slide_idx: int, im
                 if ph.placeholder_format.type == 18: # PICTURE
                     if image_url:
                         img_bytes = _download_image(image_url)
-                        if img_bytes: _fill_picture_placeholder(ph, img_bytes)
+                        if img_bytes:
+                            _fill_picture_placeholder(ph, img_bytes)
+                            image_handled = True
                 else:
                     _fill_placeholder(ph, content)
         except Exception as e:
             logger.debug(f"[TemplateAgent] Error filling placeholder {str_idx}: {e}")
             
+    # Fallback: if we have an image but it wasn't natively mapped, inject it directly
+    if image_url and not image_handled:
+        img_bytes = _download_image(image_url)
+        if img_bytes:
+            # Place dynamically on the right half or full screen if intro
+            if slide_data.get("intent") == "intro":
+                # For intro, maybe add as a big center piece or background
+                slide.shapes.add_picture(io.BytesIO(img_bytes), Inches(1), Inches(1), width=Inches(11.33))
+                slide.shapes._spTree.insert(2, slide.shapes[-1]._element) # Send to back
+            else:
+                try: 
+                    # Drop on the right
+                    slide.shapes.add_picture(io.BytesIO(img_bytes), Inches(6.8), Inches(1.5), width=Inches(6.0))
+                except: pass
+
     # Try inserting chart natively or draw fallback chart if needed
     if chart_data and slide_data.get("visual_type") == "chart":
         logger.debug("[TemplateAgent] (Not fully implemented) native chart injection. Need native object manipulation.")
